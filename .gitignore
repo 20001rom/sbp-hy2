@@ -1,0 +1,33 @@
+# ===== 测试临时文件 =====
+tests/bin/
+tests/.work/
+*.tmp.json
+*.tmp.yaml
+
+# ===== 运行期生成的文件（含凭证，绝不能提交）=====
+env.conf
+config.yaml
+config.json
+ports.env
+share-links.txt
+*.bak
+
+# ===== Hysteria / Xray 运行时数据 =====
+acme/
+www/
+geoip.dat
+geosite.dat
+*.dlpart.*
+.hysteria-geoloader.*
+
+# ===== 证书与密钥 =====
+*.pem
+*.crt
+*.key
+!bin/*.sha256
+
+# ===== 注意：bin/ 下的二进制必须提交 =====
+# bin/hysteria-linux-amd64  （24 MB，官方裸二进制）
+# bin/xray-linux-64          （34 MB，已解压）
+# bin/*.sha256 / bin/VERSION / bin/HY_VERSION
+# 这是设计核心：服务器端零解压依赖。不要加进 .gitignore。
