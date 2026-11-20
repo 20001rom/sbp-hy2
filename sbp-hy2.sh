@@ -914,10 +914,34 @@ deploy(){
   save_env
   if [[ "${MASQ_TYPE}" == "file" ]]; then
     mkdir -p "$MASQ_DIR"
-    [[ -f "$MASQ_DIR/index.html" ]] || cat > "$MASQ_DIR/index.html" <<'HTML'
-<!doctype html><html><head><meta charset="utf-8"><title>Welcome</title></head>
-<body><h1>It works!</h1></body></html>
+    if [[ -f "$MASQ_DIR/index.html" ]]; then
+      info "静态站已存在，保留不覆盖：$MASQ_DIR"
+    else
+      # 简陋的 "It works!" 页面本身就是特征——真实网站不会这么空。
+      # 生成一个像样的静态站（多页 + CSS + robots.txt + 404）。
+      if [[ -f "${SBP_DIR}/lib/masq-site.sh" ]]; then
+        # shellcheck disable=SC1091
+        . "${SBP_DIR}/lib/masq-site.sh"
+        masq_site_gen "$MASQ_DIR" || warn "静态站生成失败，退回最简页面"
+      fi
+      if [[ ! -f "$MASQ_DIR/index.html" ]]; then
+        # 兜底：库缺失时至少给一个结构完整的页面
+        cat > "$MASQ_DIR/index.html" <<'HTML'
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Welcome</title>
+<style>body{font:16px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;
+max-width:640px;margin:80px auto;padding:0 24px;color:#222}
+h1{font-weight:600;letter-spacing:-.01em}p{color:#666}</style>
+</head><body>
+<h1>Welcome</h1>
+<p>This site is under construction. Please check back later.</p>
+</body></html>
 HTML
+        warn "使用兜底页面（lib/masq-site.sh 缺失）"
+      fi
+    fi
   fi
   write_config || die "配置生成失败"
 

@@ -31,3 +31,6 @@ geosite.dat
 # bin/xray-linux-64          （34 MB，已解压）
 # bin/*.sha256 / bin/VERSION / bin/HY_VERSION
 # 这是设计核心：服务器端零解压依赖。不要加进 .gitignore。
+
+# 静态站预览（截图用，不入库）
+tests/preview/

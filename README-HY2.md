@@ -190,6 +190,43 @@ sudo ENABLE_LISTEN_HTTP=true ENABLE_LISTEN_HTTPS=true FORCE_HTTPS=true bash sbp-
 
 官方说这是"go the extra mile"的选项——没有证据表明防火墙在用"缺少 TCP HTTP"来识别 Hy2，但确实能补齐这个破绽。
 
+## 默认静态站
+
+`MASQ_TYPE=file` 时会自动生成一套完整静态站，**不是**一行 `<h1>It works!</h1>` ——那本身就太像占位页。
+
+生成内容：
+
+```
+MASQ_DIR/
+├── index.html     首页（Hero + 三张卡片 + 说明）
+├── about.html     关于（工作方式 + 基础设施）
+├── contact.html   联系（邮箱 + 说明）
+├── 404.html       错误页
+├── robots.txt     允许全部抓取
+└── assets/style.css   深/浅色自适应 + 响应式
+```
+
+**站点名自动取域名首段**（`acme-lab.com` → `Acme-lab`），无域名时用 `Northwind`。
+
+设计意图：像"某个小技术团队的主页"，**不模仿任何知名网站**（避免版权和指纹问题）。
+
+### 自定义
+
+已有 `index.html` 时脚本**不会覆盖**，所以你可以先放自己的站：
+
+```bash
+# 方式一：用自己的站
+mkdir -p /etc/hysteria/www
+# 把你的静态文件放进去
+sudo bash sbp-hy2.sh deploy ...
+
+# 方式二：让脚本生成后再改
+sudo bash sbp-hy2.sh deploy ...
+vi /etc/hysteria/www/index.html
+```
+
+**建议**：如果只是想要"看起来正常"，默认生成的站够用了。如果想更真实，抓一个中性站点（技术博客、文档站），**不要用知名大站的完整镜像**。
+
 ## 拥塞控制
 
 默认 BBR（自适应，不需要知道带宽）。
