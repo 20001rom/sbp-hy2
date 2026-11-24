@@ -15,8 +15,7 @@ echo "    Xray: https://raw.githubusercontent.com/20001rom/sbp-xray/main/bin/xra
 
 echo
 echo "=== README 快速开始命令 ==="
-grep -A2 'raw.githubusercontent' README-HY2.md 2>/dev/null | head -6 | sed 's/^/  /'
-grep 'raw.githubusercontent' README.md 2>/dev/null | head -2 | sed 's/^/  /'
+grep -A2 'raw.githubusercontent' README.md 2>/dev/null | head -6 | sed 's/^/  /'
 
 echo
 echo "=== 自检 ==="
