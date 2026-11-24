@@ -13,19 +13,35 @@
 set -Eeuo pipefail
 
 # 在赋默认值前快照外部环境键，供 load_env 区分"用户显式指定"与"脚本默认"
+#
+# 快照必须在所有 `VAR="${VAR:-default}"` 之前完成，否则那些键已经有了默认值、
+# 会被误判成"用户显式指定"，load_env 就会跳过 env.conf 里的同名键（env.conf 形同虚设）。
+# 位置参数（`deploy OBFS_TYPE=gecko`）是 main() 里才 export 的，所以 main() 里
+# export 完要把这些键**追加**进快照（不能重做，见 main() 里的说明）。
 _SBP_ENV_KEYS=""
-for _k in HY2_LISTEN HY2_PORT_START HY2_PORT_END AUTH_PASSWORD \
-          OBFS_TYPE OBFS_PASSWORD GECKO_MIN GECKO_MAX \
-          MASQ_TYPE MASQ_URL MASQ_DIR MASQ_STATUS \
-          ENABLE_LISTEN_HTTP ENABLE_LISTEN_HTTPS FORCE_HTTPS \
-          TLS_MODE TLS_DOMAIN TLS_EMAIL TLS_CERT TLS_KEY ACME_CA ACME_TYPE \
-          SNI_GUARD CONGESTION_TYPE BBR_PROFILE BW_UP BW_DOWN IGNORE_CLIENT_BW \
-          UDP_IDLE DISABLE_UDP ENABLE_ACL ACL_REJECT_CN \
-          TRAFFIC_STATS_PORT TRAFFIC_STATS_SECRET VERIFY_DOMAIN_STRICT \
-          HY2_BIN HY2_PKG; do
-  [[ -n "${!_k+x}" ]] && _SBP_ENV_KEYS="$_SBP_ENV_KEYS $_k"
-done
-unset _k
+_sbp_env_keys_snapshot(){
+  local -a keys=(
+    HY2_LISTEN HY2_PORT_START HY2_PORT_END AUTH_PASSWORD
+    OBFS_TYPE OBFS_PASSWORD GECKO_MIN GECKO_MAX
+    WARP_ENABLED WARP_SOCKS_ADDR WARP_AUTH_USER WARP_AUTH_PASS
+    MASQ_TYPE MASQ_URL MASQ_DIR MASQ_STATUS
+    ENABLE_LISTEN_HTTP ENABLE_LISTEN_HTTPS FORCE_HTTPS
+    TLS_MODE TLS_DOMAIN TLS_EMAIL TLS_CERT TLS_KEY ACME_CA ACME_TYPE
+    SNI_GUARD CONGESTION_TYPE BBR_PROFILE BW_UP BW_DOWN IGNORE_CLIENT_BW
+    UDP_IDLE DISABLE_UDP ENABLE_ACL ACL_REJECT_CN
+    TRAFFIC_STATS_PORT TRAFFIC_STATS_SECRET VERIFY_DOMAIN_STRICT
+    HY2_BIN HY2_PKG
+  )
+  local _k
+  _SBP_ENV_KEYS=""
+  for _k in "${keys[@]}"; do
+    # set -u 下不能直接展开未定义变量，先用 +x 探测存在性
+    if [[ -n "${!_k+x}" ]]; then
+      _SBP_ENV_KEYS="$_SBP_ENV_KEYS $_k"
+    fi
+  done
+}
+_sbp_env_keys_snapshot
 
 SCRIPT_VERSION="v1.0.0"
 # SBP_DIR 由 sbp.sh 传入；直接跑本脚本时可能未定义，这里兜底
@@ -69,6 +85,33 @@ HY2_PORT_END="${HY2_PORT_END:-50000}"
 
 # ===== 认证 =====
 AUTH_PASSWORD="${AUTH_PASSWORD:-}"
+
+# ===== WARP 分流 =====
+# 第二个账号走本地 SOCKS5（通常指向 sing-box 的 WARP 出口），第一个账号直连。
+# 靠 auth.id 分流，两个账号共用同一个端口，不需要第二个监听。
+#
+# 为什么用 userpass 而不是两个端口：
+#   listen 是单值，一个 hysteria 实例只能监听一个端口（官方文档：listen 字段
+#   是单个地址字符串）。要两个端口就得开两个实例，内存翻倍、证书要重复配置。
+#   userpass + acl.rules 让同一端口按账号分流，客户端切节点即可换出口。
+#
+#   auth:
+#     type: userpass
+#     userpass:
+#       main: <密码>        → 走 direct
+#       warp: <密码>        → 走 socks5
+#   acl:
+#     rules:
+#       - outbound: warp
+#         match: auth.id == "warp"
+#       - outbound: default
+#
+# 注意 acl.rules 是 2.14.0 起的表达式语法（可用 auth.id）；旧的 inline 语法
+# 只支持 outbound(address) 形式，不能按账号匹配。
+WARP_ENABLED="${WARP_ENABLED:-false}"
+WARP_SOCKS_ADDR="${WARP_SOCKS_ADDR:-127.0.0.1:40000}"
+WARP_AUTH_USER="${WARP_AUTH_USER:-warp}"
+WARP_AUTH_PASS="${WARP_AUTH_PASS:-}"
 
 # ===== 混淆（这是选官方版的主要理由）=====
 #   none        —— 不混淆，伪装成标准 HTTP/3。masquerade 有效（推荐默认）
@@ -297,6 +340,19 @@ validate_params(){
     strict|disable|dns-san) ;;
     *) warn "SNI_GUARD=${SNI_GUARD} 非法，回退 dns-san"; SNI_GUARD=dns-san ;;
   esac
+  if [[ "${WARP_ENABLED:-false}" == "true" ]]; then
+    # WARP 账号名会写进 acl.rules 的 match 表达式，不能带引号或空格
+    if [[ ! "${WARP_AUTH_USER}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+      die "WARP_AUTH_USER 含非法字符（只允许字母数字下划线横线）：${WARP_AUTH_USER}"
+    fi
+    if [[ "${WARP_AUTH_USER}" == "main" ]]; then
+      die "WARP_AUTH_USER 不能是 main（那是直连账号）"
+    fi
+    # 只监听本机回环的 SOCKS5 是常规用法；写成 0.0.0.0 会把 WARP 出口暴露到公网
+    if [[ "${WARP_SOCKS_ADDR}" == 0.0.0.0:* ]]; then
+      warn "WARP_SOCKS_ADDR 监听 0.0.0.0，WARP 出口会暴露给公网，建议改成 127.0.0.1"
+    fi
+  fi
   # gecko 包大小约束
   # 顺序很重要：先截断上限，再校验 min<=max。
   # 原实现先对调再截断，GECKO_MIN=3000/GECKO_MAX=5000 会生成
@@ -344,6 +400,7 @@ save_env(){
     echo "# SBP-Hy2 配置（含密钥，请勿泄露）"
     for k in HY2_LISTEN ENABLE_PORT_HOP HY2_PORT_START HY2_PORT_END \
              AUTH_PASSWORD OBFS_TYPE OBFS_PASSWORD GECKO_MIN GECKO_MAX \
+             WARP_ENABLED WARP_SOCKS_ADDR WARP_AUTH_USER WARP_AUTH_PASS \
              TLS_MODE TLS_DOMAIN TLS_EMAIL TLS_CERT TLS_KEY ACME_CA ACME_TYPE SNI_GUARD \
              CONGESTION_TYPE BBR_PROFILE BW_UP BW_DOWN IGNORE_CLIENT_BW \
              UDP_IDLE DISABLE_UDP \
@@ -366,6 +423,9 @@ ensure_creds(){
   fi
   if [[ "${ENABLE_ACL}" == "true" && -n "${TRAFFIC_STATS_PORT}" ]]; then
     TRAFFIC_STATS_SECRET="${TRAFFIC_STATS_SECRET:-$(openssl rand -hex 16)}"
+  fi
+  if [[ "${WARP_ENABLED}" == "true" ]]; then
+    WARP_AUTH_PASS="${WARP_AUTH_PASS:-$(openssl rand -base64 24 | tr -d '\n')}"
   fi
 }
 
@@ -573,11 +633,21 @@ EOF
   fi
 
   # 认证
-  cat <<EOF
+  if [[ "${WARP_ENABLED}" == "true" ]]; then
+    cat <<EOF
+auth:
+  type: userpass
+  userpass:
+    main: $(yaml_escape "$AUTH_PASSWORD")
+    ${WARP_AUTH_USER}: $(yaml_escape "$WARP_AUTH_PASS")
+EOF
+  else
+    cat <<EOF
 auth:
   type: password
   password: $(yaml_escape "$AUTH_PASSWORD")
 EOF
+  fi
 
   # 拥塞控制
   echo "congestion:"
@@ -625,18 +695,29 @@ EOF
   # ACL
   # 只有至少一条规则时才输出 acl 段；否则会生成空的 `inline:`，
   # 虽能通过校验但是无效配置。
-  if [[ "${ENABLE_ACL}" == "true" ]]; then
-    local acl_rules=()
-    [[ "${ACL_REJECT_CN}" == "true" ]] && acl_rules+=("reject(geoip:cn)")
-    if (( ${#acl_rules[@]} > 0 )); then
+  #
+  # WARP 启用时用 rules（表达式语法，2.14.0+），inline（旧语法）只支持
+  # outbound(address) 形式，无法按 auth.id 匹配。
+  if [[ "${ENABLE_ACL}" == "true" || "${WARP_ENABLED}" == "true" ]]; then
+    if [[ "${WARP_ENABLED}" == "true" ]]; then
       echo "acl:"
-      echo "  inline:"
-      local r
-      for r in "${acl_rules[@]}"; do
-        echo "    - ${r}"
-      done
-    else
-      warn "ENABLE_ACL=true 但没有任何 ACL 规则（ACL_REJECT_CN=false），跳过 acl 段"
+      echo "  rules:"
+      echo "    - outbound: warp"
+      echo "      match: auth.id == \"${WARP_AUTH_USER}\""
+      echo "    - outbound: default"
+    elif [[ "${ENABLE_ACL}" == "true" ]]; then
+      local acl_rules=()
+      [[ "${ACL_REJECT_CN}" == "true" ]] && acl_rules+=("reject(geoip:cn)")
+      if (( ${#acl_rules[@]} > 0 )); then
+        echo "acl:"
+        echo "  inline:"
+        local r
+        for r in "${acl_rules[@]}"; do
+          echo "    - ${r}"
+        done
+      else
+        warn "ENABLE_ACL=true 但没有任何 ACL 规则（ACL_REJECT_CN=false），跳过 acl 段"
+      fi
     fi
   fi
 
@@ -644,6 +725,12 @@ EOF
   echo "outbounds:"
   echo "  - name: default"
   echo "    type: direct"
+  if [[ "${WARP_ENABLED}" == "true" ]]; then
+    echo "  - name: warp"
+    echo "    type: socks5"
+    echo "    socks5:"
+    echo "      addr: ${WARP_SOCKS_ADDR}"
+  fi
   if [[ "${ENABLE_ACL}" == "true" && -n "${TRAFFIC_STATS_PORT}" ]]; then
     cat <<EOF
 trafficStats:
@@ -864,6 +951,17 @@ print_links(){
   echo "  端口: ${HY2_LISTEN}$([[ "$ENABLE_PORT_HOP" == "true" ]] && echo " → 跳跃 ${HY2_PORT_START}-${HY2_PORT_END}")"
   echo "  TLS : ${TLS_MODE}$([[ "$TLS_MODE" == "acme" ]] && echo " (${TLS_DOMAIN})")"
   echo "  伪装: masquerade=${MASQ_TYPE}${MASQ_URL:+ → $MASQ_URL}"
+
+  if [[ "${WARP_ENABLED}" == "true" ]]; then
+    # userpass 的密码是「用户名:密码」整体，客户端把它当一个凭据串传过去
+    local warp_link="hysteria2://$(urlenc "${WARP_AUTH_USER}:${WARP_AUTH_PASS}")@${host}:${port}?${q}#SBP-WARP"
+    echo
+    printf "${C_BOLD}WARP 节点链接${C_RESET}\n"
+    printf '%s\n' "$warp_link"
+    echo
+    echo "  出口: ${WARP_SOCKS_ADDR}"
+    echo "  两个节点同端口同混淆，服务端按账号分流：SBP-Hy2 直连，SBP-WARP 走 WARP"
+  fi
   echo
 }
 
@@ -978,6 +1076,9 @@ show_status(){
   echo "拥塞: ${CONGESTION_TYPE}$([[ "$CONGESTION_TYPE" == "bbr" ]] && echo "/${BBR_PROFILE}")"
   echo "伪装: ${MASQ_TYPE}${MASQ_URL:+ → $MASQ_URL}"
   echo "ACL : ${ENABLE_ACL}$([[ "$ACL_REJECT_CN" == "true" ]] && echo " (reject geoip:cn)")"
+  if [[ "${WARP_ENABLED:-false}" == "true" ]]; then
+    echo "WARP: ${WARP_AUTH_USER} → ${WARP_SOCKS_ADDR}"
+  fi
   echo "UDP 空闲: ${UDP_IDLE}"
 }
 
@@ -1091,6 +1192,10 @@ SBP-Hy2 ${SCRIPT_VERSION} —— 官方 Hysteria 2 部署（Hy2 做主力）
   BW_UP / BW_DOWN   Brutal 带宽，如 "100 mbps"
   ENABLE_ACL        true 启用 ACL 分流
   ACL_REJECT_CN     true 拒绝 geoip:cn
+  WARP_ENABLED      true 启用 WARP 分流（第二个账号走本地 SOCKS5）
+  WARP_SOCKS_ADDR   WARP 出口地址，默认 127.0.0.1:40000（通常是 sing-box）
+  WARP_AUTH_USER    WARP 账号名，默认 warp
+  WARP_AUTH_PASS    WARP 账号密码，留空自动生成
   TRAFFIC_STATS_PORT/SECRET  流量统计 API
   HY2_BIN           本地已解压二进制路径
   HY_SOURCE         repo（本仓库，默认）/ release（官方）
@@ -1131,10 +1236,21 @@ main(){
 
   # 支持 `bash sbp-hy2.sh deploy TLS_DOMAIN=xxx TLS_EMAIL=yyy` 这种写法。
   # 原来是直接丢弃位置参数，导致文档里的用法静默失效（audit 发现）。
+  #
+  # 位置参数要 export（让后续函数读到），同时记进 _SBP_ENV_KEYS
+  # （让 load_env 知道这些键是用户显式指定的，不会被 env.conf 里的旧值覆盖）。
+  #
+  # 只能**追加**位置参数带来的键，不能重做整个快照 ——
+  # 重做时所有变量都已经有了脚本默认值，会被整体误判成"用户指定"，
+  # 结果 env.conf 里的每一个键都被跳过，env.conf 等于失效。
   local kv
   for kv in "$@"; do
     if [[ "$kv" =~ ^[A-Z_][A-Z0-9_]*= ]]; then
       export "$kv"
+      local _key="${kv%%=*}"
+      if [[ " $_SBP_ENV_KEYS " != *" $_key "* ]]; then
+        _SBP_ENV_KEYS="$_SBP_ENV_KEYS $_key"
+      fi
     else
       warn "忽略无法识别的参数：$kv（应为 VAR=VALUE 形式）"
     fi
@@ -1152,6 +1268,9 @@ main(){
       validate_params
       AUTH_PASSWORD="${AUTH_PASSWORD:-placeholder}"
       OBFS_PASSWORD="${OBFS_PASSWORD:-placeholder}"
+      if [[ "${WARP_ENABLED}" == "true" ]]; then
+        WARP_AUTH_PASS="${WARP_AUTH_PASS:-placeholder}"
+      fi
       TLS_DOMAIN="${TLS_DOMAIN:-example.com}"
       TLS_EMAIL="${TLS_EMAIL:-admin@example.com}"
       render_config ;;
